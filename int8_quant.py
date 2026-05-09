@@ -198,8 +198,8 @@ if _COMFY_OPS_AVAILABLE:
                         Int8TensorwiseOps.applied_lora_patches.add(nk)
 
                         # Print only if multiple sub-patches map to the same layer
-                        if "weight" in key and len(patches) > 1:
-                            print(f"INT8 Fast: Baking multiple LoRA parts into {nk} ({len(patches)} sub-patches)")
+                        # if "weight" in key and len(patches) > 1:
+                        #     print(f"INT8 Fast: Baking multiple LoRA parts into {nk} ({len(patches)} sub-patches)")
                             
                         # ComfyUI dynamically patches during inference using lora_compute_dtype()
                         # On most modern GPUs, this evaluates to torch.float16. 
@@ -572,7 +572,8 @@ class INT8ModelPatcher(comfy.model_patcher.ModelPatcher):
                     patched_weight_float = rotate_weight(patched_weight_float, H, group_size=group_size)
 
                 # 5. Re-quantize back to INT8 using the original scale
-                patched_weight_int8 = stochastic_round_int8_delta(patched_weight_float, scale) #quantize_int8(patched_weight_float, scale) #stochastic_round_int8_delta(patched_weight_float, scale) #quantize_int8(patched_weight_float, scale)
+                patched_weight_int8 = quantize_int8(patched_weight_float, scale) #stochastic_round_int8_delta(patched_weight_float, scale) 
+                #I'm not really sure whether to stochastic round or not, results seem to depend on a per-lora basis.
 
                 # 6. Move back to original device and store
                 patched_weight_int8 = patched_weight_int8.to(weight_int8.device)
