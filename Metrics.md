@@ -37,6 +37,8 @@ The general takeaway is that in terms of tested quantization methods the ranking
 GGUF Q8 > INT8 ConvRot > MXFP8 > FP8 >= INT8 Row > INT8 Tensorwise
 
 Every INT8 ConvRot and INT8 Row checkpoint was created from BF16 via on the fly quantization, unless stated otherwise.
+INT8 ConvRot is row-wise INT8 with parameters and activations rotated before quantization via ConvRot.
+INT8 Row is just regular row wise INT8.
 
 Anima
 
