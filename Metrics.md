@@ -36,6 +36,8 @@ The general takeaway is that in terms of tested quantization methods the ranking
 
 GGUF Q8 > INT8 ConvRot > MXFP8 > FP8 >= INT8 Row > INT8 Tensorwise
 
+Every INT8 ConvRot and INT8 Row checkpoint was created from BF16 via on the fly quantization, unless stated otherwise.
+
 Anima
 
 100 samples per column.
