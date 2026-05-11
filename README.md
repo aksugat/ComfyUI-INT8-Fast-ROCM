@@ -66,7 +66,7 @@ Measured on a 3090 at 1024x1024, 26 steps with Flux2 Klein Base 9B.
 
 I would also like to point out that we beat Nunchaku INT4 on every quality measurement in the [Quality Metrics](Metrics.md)
 
-Measured on an 8gb 5060, same settings:
+Klein 9B, Measured on an 8gb 5060, same settings as the 3090 run:
 
 | Format | Speed (s/it) ↓ | Relative Speedup |
 |-------|--------------|------------------|
