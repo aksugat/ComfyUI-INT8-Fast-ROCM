@@ -4,7 +4,7 @@ We capture the latents per step, and measure how much they diverge from the BF16
 ## Lora 
 
 In this table, we compare the quality of our various lora approaches, against a standard bf16 lora loader baseline.
-The TLDR is that Pre-Lora is within marging of error of Dynamic Lora. Post-Lora is slightly worse. GGUF Q8 dequantizes to bf16 during inference to apply the lora math which is both slow and cheating. Nunchaku lora appears to be a little broken.
+The TLDR is that Pre-Lora is within marging of error of Dynamic Lora. Post-Lora is slightly worse. GGUF Q8 dequantizes to bf16 during inference to apply the lora math which is both slow and cheating. Nunchaku lora appears to be a little broken. Alternatively, maybe there is a reverse QAT like effect when using QLora on a BF16 model, lowering the quality, bringing it closer to quantized models.
 
 Interesting observation: These consistently score higher than their non-lora counterparts. I suspect it could be that there is a QAT like effect for applying loras trained with quantization to quantized models.
 
