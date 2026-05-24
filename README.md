@@ -7,6 +7,14 @@ Works with lora, torch compile.
 
 Updates:
 
+2026-24-05:
+
+RAM usage for lora loading is fixed and on par with base comfy.
+
+RAM usage for model loading is fixed.
+
+Only thing that remains is on the fly quantization will create an extra int8 copy in memory, but it is too much of a hassle to work around. Please rely on swap or pre converted models if this is an issue.
+
 2026-15-05:
 
 Bringing back stochastic lora. Some loras appear to need it, others don't, try it if your lora is not working and you don't like pre-lora. TLDR is "sometimes it really helps, sometimes its a little worse". See our measurements [here](https://github.com/BobJohnson24/ComfyUI-INT8-Fast/blob/RAMExp/Metrics.md#some-loras-require-stochastic-lora-to-work).
