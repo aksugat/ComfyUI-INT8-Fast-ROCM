@@ -4,7 +4,7 @@ Originally from: https://github.com/newgrit1004/ComfyUI-ZImage-Triton
 License: MIT
 
 Spreads activation outliers across channels using orthogonal Hadamard matrices.
-Based on ConvRot (2024) and ConvRot (2025) approaches, adapted for DiT models
+Based on QuaRot (2024) and ConvRot (2025) approaches, adapted for DiT models
 with group-wise rotation to avoid row-wise outlier amplification.
 """
 
