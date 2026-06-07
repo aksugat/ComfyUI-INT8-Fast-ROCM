@@ -25,7 +25,7 @@ class UNetLoaderINTW8A8:
         return {
             "required": {
                 "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
-                "weight_dtype": (["default", "fp16", "bf16", "fp32"],),
+                "weight_dtype": (["default", "fp16", "bf16", "fp32"], {"tooltip": "INT8 compute dtype. Default follows the model dtype, but uses fp16 for RTX 20/T4 sm75 GPUs and fp32 for GTX 16/unknown sm75 GPUs. Manual values force that dtype."}),
                 "model_type": (["flux2", "z-image", "ideogram4", "chroma", "wan", "ltx2", "qwen", "ernie", "anima", "hidream o1"], {"tooltip": "Only used for on the fly quantization, to filter sensitive layers."}),
                 "on_the_fly_quantization": ("BOOLEAN", {"default": False, "tooltip": "Quantize a higher precision model to INT8. If the selected model is already INT8 keep unchecked."}),
                 "enable_convrot": ("BOOLEAN", {"default": True, "tooltip": "Enable ConvRot for better quantization. ~1.1x slower, but near-GGUF_Q8 quality."}),

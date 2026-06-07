@@ -186,6 +186,36 @@ if _COMFY_OPS_AVAILABLE:
         lora_strength = 1.0
         dynamic_load_device = None # Set by the loader when Aimdo should avoid a full CPU staging copy
         skeleton_meta_init = False # Temporary mode for LoRA key-map discovery
+        _auto_compute_dtype_by_device = {}
+
+        @staticmethod
+        def _default_compute_dtype(x: Tensor) -> torch.dtype:
+            if x.dtype in (torch.float16, torch.bfloat16):
+                return x.dtype
+
+            if x.dtype == torch.float32 and x.is_cuda:
+                device_index = x.device.index
+                if device_index is None:
+                    device_index = torch.cuda.current_device()
+                cached = Int8TensorwiseOps._auto_compute_dtype_by_device.get(device_index)
+                if cached is not None:
+                    return cached
+
+                compute_dtype = torch.float32
+                try:
+                    capability = torch.cuda.get_device_capability(device_index)
+                    name = torch.cuda.get_device_name(device_index).lower()
+                    if capability == (7, 5) and ("rtx" in name or "t4" in name):
+                        compute_dtype = torch.float16
+                except Exception:
+                    pass
+
+                Int8TensorwiseOps._auto_compute_dtype_by_device[device_index] = compute_dtype
+                return compute_dtype
+
+            if x.dtype == torch.float32:
+                return torch.float32
+            return torch.float16
         
         class Linear(manual_cast.Linear):
             def __init__(self, in_features, out_features, bias=True, device=None, dtype=None):
@@ -626,12 +656,11 @@ if _COMFY_OPS_AVAILABLE:
                 
                 compute_dtype = Int8TensorwiseOps.compute_dtype
                 if compute_dtype is None:
-                    compute_dtype = x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else torch.float16
-                print("The dtype is: ", compute_dtype)
+                    compute_dtype = Int8TensorwiseOps._default_compute_dtype(x)
 
                 x_shape = x.shape
                 x_2d = x.reshape(-1, x_shape[-1])
-                if Int8TensorwiseOps.compute_dtype is not None and x_2d.dtype != compute_dtype:
+                if x_2d.dtype != compute_dtype:
                     x_2d = x_2d.to(compute_dtype)
                 
                 if getattr(self, "_use_convrot", False):
