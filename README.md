@@ -5,7 +5,9 @@ Works with lora, torch compile.
 
 Further Reading:
 [Quality Metrics comparing against MXFP8, FP8, GGUF, etc.](Metrics.md)
+
 [Speed](Speed.md)
+
 [List of Prequantized Checkpoints](Models.md)
 
 ---
