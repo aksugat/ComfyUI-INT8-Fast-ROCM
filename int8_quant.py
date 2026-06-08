@@ -1069,8 +1069,10 @@ class INT8ModelPatcher(comfy.model_patcher.ModelPatcher):
             
         self.__class__ = dynamic_cls
         
-        # Provide a fallback for non-dynamic delegates (e.g. for KJNodes)
-        if getattr(self, "cached_patcher_init", None) is None:
+        # Static clones do not need a disk reload factory. Dynamic-to-static
+        # delegates do: sharing the dynamic model object makes ComfyUI treat
+        # the static copy as a replacement instead of an independent model.
+        if not self.is_dynamic() and getattr(self, "cached_patcher_init", None) is None:
             self.cached_patcher_init = (lambda *a, **kw: self, ())
             
         n = super().clone(*args, **kwargs)

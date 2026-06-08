@@ -13,6 +13,19 @@ import logging
 from .int8_quant import Int8TensorwiseOps
 
 
+def _load_int8_unet_cached_patcher(unet_name, weight_dtype, model_type, on_the_fly_quantization, enable_convrot, lora_mode, pre_lora=None, disable_dynamic=False):
+    return UNetLoaderINTW8A8().load_unet(
+        unet_name,
+        weight_dtype,
+        model_type,
+        on_the_fly_quantization,
+        enable_convrot=enable_convrot,
+        lora_mode=lora_mode,
+        pre_lora=pre_lora,
+        disable_dynamic=disable_dynamic,
+    )[0]
+
+
 class UNetLoaderINTW8A8:
     """
     Load INT8 tensorwise quantized diffusion models.
@@ -41,7 +54,7 @@ class UNetLoaderINTW8A8:
     CATEGORY = "loaders"
     DESCRIPTION = "Load and Quantize INT8 models with fast triton inference."
 
-    def load_unet(self, unet_name, weight_dtype, model_type, on_the_fly_quantization, enable_convrot=False, lora_mode="None", pre_lora=None):
+    def load_unet(self, unet_name, weight_dtype, model_type, on_the_fly_quantization, enable_convrot=False, lora_mode="None", pre_lora=None, disable_dynamic=False):
         unet_path = folder_paths.get_full_path("diffusion_models", unet_name)
 
         # Backward compatibility for workflows saved with the old dynamic_lora boolean widget.
@@ -208,7 +221,7 @@ class UNetLoaderINTW8A8:
         # Load model using the already-loaded state dict
         try:
             Int8TensorwiseOps.applied_lora_patches = set()
-            model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata)
+            model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata, disable_dynamic=disable_dynamic)
             
             # Print unmatched keys to help with debugging
             if Int8TensorwiseOps.lora_patches:
@@ -233,6 +246,10 @@ class UNetLoaderINTW8A8:
         # Wrap in custom patcher for unified LoRA support
         from .int8_quant import INT8ModelPatcher
         model = INT8ModelPatcher.clone(model)
+        model.cached_patcher_init = (
+            _load_int8_unet_cached_patcher,
+            (unet_name, weight_dtype, model_type, on_the_fly_quantization, enable_convrot, lora_mode, pre_lora),
+        )
         # Stash metadata in two places so it survives ModelPatcher.clone()
         # (which is invoked by INT8GroupedLora and other downstream nodes).
         # ModelPatcher.clone() returns a fresh patcher and does NOT carry over
