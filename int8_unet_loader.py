@@ -13,6 +13,19 @@ import logging
 from .int8_quant import Int8TensorwiseOps
 
 
+def _load_int8_unet_cached_patcher(unet_name, weight_dtype, model_type, on_the_fly_quantization, enable_convrot, lora_mode, pre_lora=None, disable_dynamic=False):
+    return UNetLoaderINTW8A8().load_unet(
+        unet_name,
+        weight_dtype,
+        model_type,
+        on_the_fly_quantization,
+        enable_convrot=enable_convrot,
+        lora_mode=lora_mode,
+        pre_lora=pre_lora,
+        disable_dynamic=disable_dynamic,
+    )[0]
+
+
 class UNetLoaderINTW8A8:
     """
     Load INT8 tensorwise quantized diffusion models.
@@ -25,7 +38,7 @@ class UNetLoaderINTW8A8:
         return {
             "required": {
                 "unet_name": (folder_paths.get_filename_list("diffusion_models"),),
-                "weight_dtype": (["default", "fp8_e4m3fn", "fp16", "bf16"],),
+                "weight_dtype": (["default", "fp16", "bf16", "fp32"], {"tooltip": "INT8 compute dtype. Default follows the model dtype, but uses fp16 for RTX 20/T4 sm75 GPUs and fp32 for GTX 16/unknown sm75 GPUs. Manual values force that dtype."}),
                 "model_type": (["flux2", "z-image", "ideogram4", "chroma", "wan", "ltx2", "qwen", "ernie", "anima", "hidream o1"], {"tooltip": "Only used for on the fly quantization, to filter sensitive layers."}),
                 "on_the_fly_quantization": ("BOOLEAN", {"default": False, "tooltip": "Quantize a higher precision model to INT8. If the selected model is already INT8 keep unchecked."}),
                 "enable_convrot": ("BOOLEAN", {"default": True, "tooltip": "Enable ConvRot for better quantization. ~1.1x slower, but near-GGUF_Q8 quality."}),
@@ -41,7 +54,7 @@ class UNetLoaderINTW8A8:
     CATEGORY = "loaders"
     DESCRIPTION = "Load and Quantize INT8 models with fast triton inference."
 
-    def load_unet(self, unet_name, weight_dtype, model_type, on_the_fly_quantization, enable_convrot=False, lora_mode="None", pre_lora=None):
+    def load_unet(self, unet_name, weight_dtype, model_type, on_the_fly_quantization, enable_convrot=False, lora_mode="None", pre_lora=None, disable_dynamic=False):
         unet_path = folder_paths.get_full_path("diffusion_models", unet_name)
 
         # Backward compatibility for workflows saved with the old dynamic_lora boolean widget.
@@ -71,6 +84,13 @@ class UNetLoaderINTW8A8:
         Int8TensorwiseOps.lora_mode = lora_mode
         Int8TensorwiseOps.dynamic_lora = lora_mode == "Dynamic"
         Int8TensorwiseOps.dynamic_load_device = None
+        dtype_map = {
+            "fp16": torch.float16,
+            "bf16": torch.bfloat16,
+            "fp32": torch.float32,
+        }
+        # Legacy no-op values are treated as default so old workflows keep loading.
+        Int8TensorwiseOps.compute_dtype = dtype_map.get(str(weight_dtype), None)
         if comfy.memory_management.aimdo_enabled and (on_the_fly_quantization or len(loras_to_load) > 0):
             Int8TensorwiseOps.dynamic_load_device = comfy.model_management.get_torch_device()
             logging.info(f"INT8 Fast: Aimdo dynamic loading active, using {Int8TensorwiseOps.dynamic_load_device} as a per-layer bake/quant work device.")
@@ -201,7 +221,7 @@ class UNetLoaderINTW8A8:
         # Load model using the already-loaded state dict
         try:
             Int8TensorwiseOps.applied_lora_patches = set()
-            model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata)
+            model = comfy.sd.load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata, disable_dynamic=disable_dynamic)
             
             # Print unmatched keys to help with debugging
             if Int8TensorwiseOps.lora_patches:
@@ -226,6 +246,10 @@ class UNetLoaderINTW8A8:
         # Wrap in custom patcher for unified LoRA support
         from .int8_quant import INT8ModelPatcher
         model = INT8ModelPatcher.clone(model)
+        model.cached_patcher_init = (
+            _load_int8_unet_cached_patcher,
+            (unet_name, weight_dtype, model_type, on_the_fly_quantization, enable_convrot, lora_mode, pre_lora),
+        )
         # Stash metadata in two places so it survives ModelPatcher.clone()
         # (which is invoked by INT8GroupedLora and other downstream nodes).
         # ModelPatcher.clone() returns a fresh patcher and does NOT carry over

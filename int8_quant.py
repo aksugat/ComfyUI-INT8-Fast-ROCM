@@ -178,6 +178,7 @@ if _COMFY_OPS_AVAILABLE:
         dynamic_quantize = False # Manual toggle for on-the-fly quantization
         enable_convrot = False # Toggle for ConvRot Hadamard rotation
         use_triton = True  # Toggle for Triton fused kernel (mirrors _use_triton)
+        compute_dtype = None # Optional override for INT8 activation/output compute dtype
         _is_prequantized = False # Keep this as a status flag, but don't use for detection
         lora_mode = "None" # None/Stochastic bake into INT8 weights; Dynamic applies LoRA at inference
         dynamic_lora = False # If True, apply LoRA dynamically at inference; if False, bake into INT8 weights at load time
@@ -185,6 +186,36 @@ if _COMFY_OPS_AVAILABLE:
         lora_strength = 1.0
         dynamic_load_device = None # Set by the loader when Aimdo should avoid a full CPU staging copy
         skeleton_meta_init = False # Temporary mode for LoRA key-map discovery
+        _auto_compute_dtype_by_device = {}
+
+        @staticmethod
+        def _default_compute_dtype(x: Tensor) -> torch.dtype:
+            if x.dtype in (torch.float16, torch.bfloat16):
+                return x.dtype
+
+            if x.dtype == torch.float32 and x.is_cuda:
+                device_index = x.device.index
+                if device_index is None:
+                    device_index = torch.cuda.current_device()
+                cached = Int8TensorwiseOps._auto_compute_dtype_by_device.get(device_index)
+                if cached is not None:
+                    return cached
+
+                compute_dtype = torch.float32
+                try:
+                    capability = torch.cuda.get_device_capability(device_index)
+                    name = torch.cuda.get_device_name(device_index).lower()
+                    if capability == (7, 5) and ("rtx" in name or "t4" in name):
+                        compute_dtype = torch.float16
+                except Exception:
+                    pass
+
+                Int8TensorwiseOps._auto_compute_dtype_by_device[device_index] = compute_dtype
+                return compute_dtype
+
+            if x.dtype == torch.float32:
+                return torch.float32
+            return torch.float16
         
         class Linear(manual_cast.Linear):
             def __init__(self, in_features, out_features, bias=True, device=None, dtype=None):
@@ -220,7 +251,7 @@ if _COMFY_OPS_AVAILABLE:
                 self._is_per_row = False  # Track quantization granularity
                 self._use_convrot = False  # Track if ConvRot was applied
                 self._weight_scale_scalar = None  # For scalar (non-tensor) scales
-                self.compute_dtype = torch.bfloat16
+                self.compute_dtype = None
                 self.comfy_cast_weights = False
                 self.lora_patches = []  # List of (down_scaled, up, start, size) set by INT8ModelPatcher
             
@@ -440,7 +471,7 @@ if _COMFY_OPS_AVAILABLE:
                             self.weight_scale = None
                             self._is_per_row = False if per_row_hint is None else per_row_hint
                             
-                    elif weight_tensor.dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float8_e4m3fn):
+                    elif weight_tensor.dtype in (torch.float16, torch.bfloat16, torch.float32):
                         # Load High-Precision
                         is_excluded = any(ex in prefix for ex in Int8TensorwiseOps.excluded_names)
                         is_dim1 = self.in_features == 1 or self.out_features == 1 or weight_tensor.ndim == 1
@@ -600,6 +631,10 @@ if _COMFY_OPS_AVAILABLE:
                         uncast_bias_weight(self, weight, bias, offload_stream)
                         return out
                     else:
+                        if x.device != self.weight.device or x.dtype != self.weight.dtype:
+                            weight = self.weight.to(device=x.device, dtype=x.dtype)
+                            bias = self.bias.to(device=x.device, dtype=x.dtype) if self.bias is not None else None
+                            return F.linear(x, weight, bias)
                         return F.linear(x, self.weight, self.bias)
                 
                 # INT8 quantized path
@@ -619,15 +654,19 @@ if _COMFY_OPS_AVAILABLE:
                 if isinstance(w_scale, torch.Tensor) and w_scale.device != x.device:
                     w_scale = w_scale.to(x.device, non_blocking=True)
                 
-                compute_dtype = x.dtype if x.dtype in (torch.float16, torch.bfloat16) else torch.bfloat16
-                
+                compute_dtype = Int8TensorwiseOps.compute_dtype
+                if compute_dtype is None:
+                    compute_dtype = Int8TensorwiseOps._default_compute_dtype(x)
+
                 x_shape = x.shape
                 x_2d = x.reshape(-1, x_shape[-1])
+                if x_2d.dtype != compute_dtype:
+                    x_2d = x_2d.to(compute_dtype)
                 
                 if getattr(self, "_use_convrot", False):
                     from .convrot import build_hadamard, rotate_activation
                     group_size = getattr(self, "_convrot_groupsize", CONVROT_GROUP_SIZE)
-                    H = build_hadamard(group_size, device=x.device, dtype=x.dtype)
+                    H = build_hadamard(group_size, device=x.device, dtype=x_2d.dtype)
                     x_2d = rotate_activation(x_2d, H, group_size=group_size)
                 
                 # Sync the loader toggle to the module-level flag read by the forward fns
@@ -642,8 +681,8 @@ if _COMFY_OPS_AVAILABLE:
                         y = int8_forward_dynamic(x_2d, weight, w_scale, bias, compute_dtype)
                 else:
                     # Small batch fallback
-                    w_float = dequantize(weight, w_scale).to(x.dtype)
-                    bias_typed = bias.to(x.dtype) if bias is not None else None
+                    w_float = dequantize(weight, w_scale).to(x_2d.dtype)
+                    bias_typed = bias.to(x_2d.dtype) if bias is not None else None
                     y = F.linear(x_2d, w_float, bias_typed)
                 
                 # Dynamic LoRA Path — handles split QKV via per-patch offsets
@@ -1030,8 +1069,10 @@ class INT8ModelPatcher(comfy.model_patcher.ModelPatcher):
             
         self.__class__ = dynamic_cls
         
-        # Provide a fallback for non-dynamic delegates (e.g. for KJNodes)
-        if getattr(self, "cached_patcher_init", None) is None:
+        # Static clones do not need a disk reload factory. Dynamic-to-static
+        # delegates do: sharing the dynamic model object makes ComfyUI treat
+        # the static copy as a replacement instead of an independent model.
+        if not self.is_dynamic() and getattr(self, "cached_patcher_init", None) is None:
             self.cached_patcher_init = (lambda *a, **kw: self, ())
             
         n = super().clone(*args, **kwargs)
