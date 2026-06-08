@@ -66,6 +66,9 @@ Q: What is Pre-Lora?
 
 A: Pre-Lora is a way to merge the lora weights to a BF16 checkpoint within ComfyUI before you quantize the model. This requires an unquantized base model, and enabling on-the-fly quantization. It is generally a higher quality way to apply a lora.
 
+Q: Torch compile takes forever and I hate it
+
+A: Use the torch compile node from [KJ Nodes](https://github.com/kijai/ComfyUI-KJNodes) and ensure you set the disable dynamic VRAM toggle.
 
 
 # Requirements:
