@@ -15,6 +15,12 @@ Further Reading:
 
 Updates:
 
+2026-06-06:
+
+Fixes for 20-series GPUs
+
+Ensuring proper handling of static weights when dynamic is deactivated
+
 2026-24-05:
 
 RAM usage for lora loading is fixed and on par with base comfy.
