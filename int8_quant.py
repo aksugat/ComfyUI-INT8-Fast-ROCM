@@ -109,7 +109,7 @@ def int8_forward_dynamic(x: Tensor, weight: Tensor, weight_scale: float | Tensor
     """Forward with dynamic per-token activation quantization."""
     
     # --- FAST PATH: Triton Fused Kernel ---
-    if _TRITON_AVAILABLE and _use_triton and x.is_cuda:
+    if _TRITON_AVAILABLE and _use_triton and x.device.type != "cpu":
         return triton_int8_linear(x, weight, weight_scale, bias, compute_dtype)
 
     # --- SLOW PATH: Standard PyTorch ---
@@ -140,7 +140,7 @@ def int8_forward_dynamic_per_row(x: Tensor, weight: Tensor, weight_scale: Tensor
         compute_dtype: Output dtype
     """
     # --- FAST PATH: Triton Fused Kernel (per-row) ---
-    if _TRITON_AVAILABLE and _use_triton and x.is_cuda:
+    if _TRITON_AVAILABLE and _use_triton and x.device.type != "cpu":
         return triton_int8_linear_per_row(x, weight, weight_scale, bias, compute_dtype)
 
     # --- SLOW PATH: Standard PyTorch ---
@@ -192,29 +192,6 @@ if _COMFY_OPS_AVAILABLE:
         def _default_compute_dtype(x: Tensor) -> torch.dtype:
             if x.dtype in (torch.float16, torch.bfloat16):
                 return x.dtype
-
-            if x.dtype == torch.float32 and x.is_cuda:
-                device_index = x.device.index
-                if device_index is None:
-                    device_index = torch.cuda.current_device()
-                cached = Int8TensorwiseOps._auto_compute_dtype_by_device.get(device_index)
-                if cached is not None:
-                    return cached
-
-                compute_dtype = torch.float32
-                try:
-                    capability = torch.cuda.get_device_capability(device_index)
-                    name = torch.cuda.get_device_name(device_index).lower()
-                    if capability == (7, 5) and ("rtx" in name or "t4" in name):
-                        compute_dtype = torch.float16
-                except Exception:
-                    pass
-
-                Int8TensorwiseOps._auto_compute_dtype_by_device[device_index] = compute_dtype
-                return compute_dtype
-
-            if x.dtype == torch.float32:
-                return torch.float32
             return torch.float16
         
         class Linear(manual_cast.Linear):
@@ -644,11 +621,24 @@ if _COMFY_OPS_AVAILABLE:
                         self, input=None, dtype=torch.int8, device=x.device,
                         bias_dtype=x.dtype, offloadable=True
                     )
+                    
+                    # Guard: cast_bias_weight may not move to device on ROCm builds
+                    if weight is not None and weight.device != x.device:
+                        weight = weight.to(x.device, non_blocking=True)
+                    if bias is not None and bias.device != x.device:
+                        bias = bias.to(x.device, non_blocking=True)
+                        
                 else:
                     # Fast path: weights already on GPU, no functions to apply
                     weight = self.weight
                     bias = self.bias
                     offload_stream = None
+                    # Guard: if weight ended up on CPU (low-VRAM offload without need_cast),
+                    # move it to the activation device before hitting Triton
+                    if weight is not None and weight.device != x.device:
+                        weight = weight.to(x.device, non_blocking=True)
+                    if bias is not None and bias.device != x.device:
+                        bias = bias.to(x.device, non_blocking=True)    
                 
                 w_scale = self._get_weight_scale()
                 if isinstance(w_scale, torch.Tensor) and w_scale.device != x.device:
@@ -674,16 +664,10 @@ if _COMFY_OPS_AVAILABLE:
                 _mod = _sys.modules[__name__]
                 _mod._use_triton = Int8TensorwiseOps.use_triton
 
-                if x_2d.shape[0] > 16:
-                    if self._is_per_row:
-                        y = int8_forward_dynamic_per_row(x_2d, weight, w_scale, bias, compute_dtype)
-                    else:
-                        y = int8_forward_dynamic(x_2d, weight, w_scale, bias, compute_dtype)
+                if self._is_per_row:
+                    y = int8_forward_dynamic_per_row(x_2d, weight, w_scale, bias, compute_dtype)
                 else:
-                    # Small batch fallback
-                    w_float = dequantize(weight, w_scale).to(x_2d.dtype)
-                    bias_typed = bias.to(x_2d.dtype) if bias is not None else None
-                    y = F.linear(x_2d, w_float, bias_typed)
+                    y = int8_forward_dynamic(x_2d, weight, w_scale, bias, compute_dtype)
                 
                 # Dynamic LoRA Path — handles split QKV via per-patch offsets
                 for lora_down, lora_up, lora_start, lora_size in self.lora_patches:
@@ -926,6 +910,16 @@ class INT8ModelPatcher(comfy.model_patcher.ModelPatcher):
                 # fused QKV layers where each of Q/K/V targets a different output slice.
                 weight = comfy.utils.get_attr(self.model, key)
                 device = weight.device if weight is not None else self.offload_device
+
+                # Cache key from the raw adapter patch objects (stable identity across steps)
+                cache_key = tuple(id(p[1]) for p in patches)
+
+                if getattr(module, "_lora_cache_key", None) == cache_key:
+                    # Same LoRA adapters, tensors already on device — skip reassignment
+                    if return_weight:
+                        return comfy.utils.get_attr(self.model, key)
+                    return
+
                 lora_patches = []
                 for p in patches:
                     strength_patch = p[0]  # float
@@ -968,6 +962,7 @@ class INT8ModelPatcher(comfy.model_patcher.ModelPatcher):
                         lora_patches.append((down_scaled.to(device), up.flatten(1).to(device), start, size))
 
                 module.lora_patches = lora_patches
+                module._lora_cache_key = cache_key
                 if return_weight:
                     return weight
                 return  # Skip standard weight-merging path
@@ -1035,9 +1030,10 @@ class INT8ModelPatcher(comfy.model_patcher.ModelPatcher):
                             module.weight_function = [f for f in getattr(module, "weight_function", []) if type(f).__name__ != "LowVramPatch"]
                         self.patch_weight_to_device(weight_key, device_to=device_to)
                     else:
+                        # https://github.com/BobJohnson24/ComfyUI-INT8-Fast/pull/73 , @bananasss00 https://github.com/bananasss00
                         if hasattr(module, "weight_function"):
                             module.weight_function = [f for f in getattr(module, "weight_function", []) if type(f).__name__ != "LowVramPatch"]
-                            
+                        
                         lowvram_patch = INT8LowVramPatch(
                             weight_key,
                             self.patches,
