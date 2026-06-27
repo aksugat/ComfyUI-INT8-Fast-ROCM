@@ -1,3 +1,14 @@
+# 🎉 --------------------------------------------------- 🎉 #
+### AMD SPECIFIC INFO ###
+The official support is problematic with AMD gpu's atm. It uses either "eager" or "triton" (you can enable this with `--enable-triton-backend` startup parameter on comfyui). Eager doesn't work for RDNA2 unless a patch is made (works for rdna4 at least dunno about rdna3) and same situation with triton backend. And even if you make them work with the PR's I'll link below, the performance is worse compared to using this node. Also, the convert_comfy_quant script works and you can also use models made with that in this node as well, so for AMD in short, use this node to quantize and load and use the models. You can convert those to comfy native compatible format to be able to use in both ways. 
+
+Long story short, at least for AMD this is still relevant until they fix the performance in the comfyui-kitchen for us. (doubt)
+
+* The PR for eager backend (for comfyui-kitchen which int8 uses)  : https://github.com/Comfy-Org/comfy-kitchen/pull/56
+* The PR for triton backend (for comfyui-kitchen which int8 uses) : https://github.com/Comfy-Org/comfy-kitchen/pull/54
+
+# 🎉 --------------------------------------------------- 🎉 #
+
 # 🎉 INT8 is now officially supported in ComfyUI 🎉
 https://github.com/Comfy-Org/ComfyUI/commit/1a510f04234e5a213d3985a1a54f65652623f4bc
 
@@ -30,7 +41,7 @@ Further Reading:
 
 Updates:
 
-2026-06-06:
+2026-06-06
 
 Fixes for 20-series GPUs
 
