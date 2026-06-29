@@ -4,6 +4,8 @@ The official support is problematic with AMD gpu's atm. It uses either "eager" o
 
 Long story short, at least for AMD this is still relevant until they fix the performance in the comfyui-kitchen for us. (doubt)
 
+* As of latest patch, models converted and saved with this node would work with both comfyui & this (and bob's original) node.
+
 * The PR for eager backend (for comfyui-kitchen which int8 uses)  : https://github.com/Comfy-Org/comfy-kitchen/pull/56
 * The PR for triton backend (for comfyui-kitchen which int8 uses) : https://github.com/Comfy-Org/comfy-kitchen/pull/54
 
