@@ -50,28 +50,19 @@ _DTYPE_MAP = {
 
 
 def _prime_int8_ops(weight_dtype, on_the_fly_quantization, enable_convrot,
-                    lora_mode, excluded_names):
+                    excluded_names):
     """
     Reset the shared Int8TensorwiseOps class-level flags before a load.
 
     These flags are GLOBAL (class attributes) and are also touched by the
     diffusion loader, so we must set every one of them here or a previous
-    diffusion load could leak stale state (LoRA patches, exclusions, etc.)
-    into the text-encoder load.
+    diffusion load could leak stale state into the text-encoder load.
     """
-    lora_mode = str(lora_mode)
-    if lora_mode not in {"None", "Stochastic", "Dynamic"}:
-        lora_mode = "None"
-
     Int8TensorwiseOps.excluded_names = list(excluded_names or [])
     Int8TensorwiseOps.dynamic_quantize = bool(on_the_fly_quantization)
     Int8TensorwiseOps.enable_convrot = bool(enable_convrot)
     Int8TensorwiseOps.use_triton = True
     Int8TensorwiseOps._is_prequantized = False
-    Int8TensorwiseOps.lora_mode = lora_mode
-    Int8TensorwiseOps.dynamic_lora = lora_mode == "Dynamic"
-    Int8TensorwiseOps.dynamic_load_device = None
-    Int8TensorwiseOps.lora_patches = {}          # critical: don't inherit UNet LoRA patches
     Int8TensorwiseOps.compute_dtype = _DTYPE_MAP.get(str(weight_dtype), None)
 
     if hasattr(Int8TensorwiseOps, "_logged_otf"):
@@ -79,12 +70,12 @@ def _prime_int8_ops(weight_dtype, on_the_fly_quantization, enable_convrot,
 
 
 def _load_int8_clip(clip_paths, clip_type, weight_dtype, on_the_fly_quantization,
-                    enable_convrot, lora_mode, excluded_names):
+                    enable_convrot, excluded_names):
     # For a pre-quantized file each layer already carries its own
     # weight/weight_scale (+ optional comfy_quant convrot metadata), so
     # exclusions are only used by the on-the-fly path.
     _prime_int8_ops(weight_dtype, on_the_fly_quantization, enable_convrot,
-                    lora_mode, excluded_names)
+                    excluded_names)
 
     state_dicts = []
     for p in clip_paths:
@@ -107,9 +98,7 @@ def _load_int8_clip(clip_paths, clip_type, weight_dtype, on_the_fly_quantization
         embedding_directory=folder_paths.get_folder_paths("embeddings"),
     )
 
-    # Wrap the text-encoder patcher so INT8 LoRA bake / dynamic paths work,
-    # exactly like the diffusion node does. With no matching patches this
-    # falls straight through to the stock ModelPatcher behaviour.
+    # Wrap the text-encoder patcher so INT8 inference works properly.
     clip.patcher = INT8ModelPatcher.clone(clip.patcher)
     return clip
 
@@ -154,7 +143,6 @@ class CLIPLoaderINT8:
                                  {"tooltip": "INT8 compute dtype. 'default' follows the encoder dtype."}),
                 "on_the_fly_quantization": ("BOOLEAN", {"default": False, "tooltip": "Quantize a bf16/fp16 encoder to INT8 at load. Leave OFF for an already-INT8 file."}),
                 "enable_convrot": ("BOOLEAN", {"default": True, "tooltip": "ConvRot rotation for on-the-fly quant. Pre-quantized files carry their own convrot flag per-layer and ignore this."}),
-                "lora_mode": (["None", "Stochastic", "Dynamic"], {"default": "None"}),
             },
         }
 
@@ -165,13 +153,13 @@ class CLIPLoaderINT8:
     DESCRIPTION = "Load an INT8 text encoder with fast triton inference."
 
     def load_clip(self, clip_name, type="wan", weight_dtype="default",
-                  on_the_fly_quantization=False, enable_convrot=True, lora_mode="None"):
+                  on_the_fly_quantization=False, enable_convrot=True):
         clip_path = _te_full_path(clip_name)
         clip_type = _clip_type_from_str(type)
         excl = _TE_DEFAULT_EXCLUSIONS if on_the_fly_quantization else []
         clip = _load_int8_clip(
             [clip_path], clip_type, weight_dtype, on_the_fly_quantization,
-            enable_convrot, lora_mode, excl,
+            enable_convrot, excl,
         )
         return (clip,)
 
@@ -195,19 +183,18 @@ class DualCLIPLoaderINT8(CLIPLoaderINT8):
                 "weight_dtype": (["default", "fp16", "bf16", "fp32"],),
                 "on_the_fly_quantization": ("BOOLEAN", {"default": False}),
                 "enable_convrot": ("BOOLEAN", {"default": True}),
-                "lora_mode": (["None", "Stochastic", "Dynamic"], {"default": "None"}),
             },
         }
 
     TITLE = "Load Dual CLIP INT8 (W8A8)"
 
     def load_clip(self, clip_name1, clip_name2, type="flux", weight_dtype="default",
-                  on_the_fly_quantization=False, enable_convrot=True, lora_mode="None"):
+                  on_the_fly_quantization=False, enable_convrot=True):
         paths = [_te_full_path(clip_name1), _te_full_path(clip_name2)]
         clip_type = _clip_type_from_str(type)
         excl = _TE_DEFAULT_EXCLUSIONS if on_the_fly_quantization else []
         clip = _load_int8_clip(
             paths, clip_type, weight_dtype, on_the_fly_quantization,
-            enable_convrot, lora_mode, excl,
+            enable_convrot, excl,
         )
         return (clip,)
