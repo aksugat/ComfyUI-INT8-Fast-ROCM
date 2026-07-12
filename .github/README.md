@@ -13,14 +13,6 @@ Move the converted clip into models\clip ; it can be loaded via the same "Load C
 * int8 clip support added
 * As of latest patch, models converted and saved with this node would work with both comfyui & this (and bob's original) node.
 
--
--
--
--
--
--
--
--
 ::::: ORIGINAL README ::::
 
 # 🎉 INT8 is now officially supported in ComfyUI 🎉
