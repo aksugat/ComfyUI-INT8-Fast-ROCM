@@ -1,118 +1,78 @@
-# 🎉 INT8 is now officially supported in ComfyUI 🎉
-https://github.com/Comfy-Org/ComfyUI/commit/1a510f04234e5a213d3985a1a54f65652623f4bc
+# ComfyUI-INT8-Fast-ROCM (AMD RDNA3-Tuned)
 
-No, I did not help at all with this and had no involvement. My **existing quants are likely to not work** due to a quant naming missmatch, but [silveroxides](https://huggingface.co/silveroxides) are likely to work as they were quite involved in the process of making this happen.
+Fast INT8 (W8A8) quantized inference for diffusion models in ComfyUI, with
+Triton kernels specifically tuned for **AMD RDNA3** consumer GPUs — validated
+on an RX 7800 XT (gfx1101).
 
-Existing INT8 fast quants can be converted to the proper native format via this script https://github.com/BobJohnson24/ComfyUI-INT8-Fast/blob/main/convert_to_comfy.py
+Forked from [patientx/ComfyUI-INT8-Fast-ROCM](https://github.com/patientx/ComfyUI-INT8-Fast-ROCM),
+itself built on [BobJohnson24/ComfyUI-INT8-Fast](https://github.com/BobJohnson24/ComfyUI-INT8-Fast).
 
-```
-python convert_comfy_quant.py I8Fast.safetensors I8Comfy.safetensors
-or
-python convert_comfy_quant.py I8Fast.safetensors --inplace
-```
+## What's different in this fork
 
-I am glad to retire with a Piña colada in my hands, on the beach. Might slim this node down to an exclusively pre-lora focused node in the future, if that does not become a default comfy feature.
+The original Triton autotune configs were sized for NVIDIA/CDNA hardware —
+large tiles (`BLOCK_N` up to 256), `num_warps=8`, deep 3-4 stage pipelining.
+That's a reasonable fit for Instinct-class GPUs with hundreds of compute
+units and 64-wide wavefronts. It's a poor fit for RDNA3 consumer cards,
+which have far fewer CUs (60 on the 7800 XT) and 32-wide wavefronts.
 
-# Comfy INT8 Acceleration
+This fork adds a second config set tuned specifically for that hardware:
+- `waves_per_eu` as an autotune key (the ROCm/Triton occupancy knob for
+  this backend, in place of CDNA's MFMA-specific `matrix_instr_nonkdim`)
+- Smaller tiles (≤128) across more configs, `num_stages=1-2`
+- Additional `BLOCK_K=128` configs for K-heavy layers (large reduction
+  dimension, small output — e.g. MLP down-projections)
+- Fixed an `other=0.0` float-literal-on-int8-load correctness issue
 
-This node speeds up Flux2, Ideogram4, Chroma, Z-Image, Ernie Image in ComfyUI by using INT8 quantization, delivering between 1.5~2x faster inference on my 3090 depending on the model. It should work on any NVIDIA GPU with enough INT8 TOPS. It appears to be faster than FP8 on 40-Series and above as well. 
-Works with lora, torch compile.
+## Benchmarks
 
-Further Reading:
+Measured on an RX 7800 XT (gfx1101), against real layer shapes pulled
+directly from a quantized Krea2 checkpoint (image stream dim=6144, text
+stream dim=2560), 3 runs averaged and weighted by how often each shape
+actually occurs in the model:
 
-[Quality Metrics comparing against MXFP8, FP8, GGUF, etc.](Metrics.md)
+| Layer type | Original configs | RDNA3-tuned | vs. `torch._int_mm` |
+|---|---|---|---|
+| Attention/proj (6144→6144) | 5.84 ms | **5.51 ms** | 2.2x faster |
+| MLP up (6144→16384) | 15.36 ms | **14.15 ms** | 1.5x faster |
+| MLP down (16384→6144) | 6.46 ms | **5.72 ms** | 4% faster |
+| Small proj (6144→1536) | 1.73 ms | 1.60 ms | `int_mm` slightly faster |
 
-[Speed](Speed.md)
+Weighted across a full forward pass: **~5% faster than the original
+configs, ~16% faster than running the same model in plain fp16.**
 
-[List of Prequantized Checkpoints](Models.md)
+One honest caveat: at small shapes (≤1536-dim layers, small batch), plain
+fp16 can beat int8 outright — the quantize/dequant overhead doesn't pay
+for itself on tiny GEMMs. Worth excluding very small layers from
+quantization rather than assuming int8 always wins.
 
----
+## Tested configuration
 
-Updates:
+- GPU: RX 7800 XT (gfx1101, RDNA3, 60 CUs)
+- PyTorch: 2.12.0+rocm7.15.0a (nightly)
+- Triton: triton-windows 3.6.0 and 3.7.1 (both confirmed correct and
+  equivalent in speed — no regression across the upgrade)
+- OS: Windows, portable/embeddable Python distribution
 
-2026-06-06
+## Known limitations
 
-Fixes for 20-series GPUs
+- **RDNA1/RDNA2 (gfx10xx) are not supported and will hang the GPU.**
+  Neither architecture has WMMA or MFMA matrix-core instructions, which
+  is what `tl.dot` on int8 inputs compiles to. This isn't a tuning
+  limitation — there's no working instruction path for this kernel to
+  target on that hardware. (ComfyUI core's own native int8 path gates
+  around this explicitly; this fork's kernel currently does not — an
+  arch check before attempting the Triton path would be a good addition.)
+- Only validated on RDNA3 (gfx1101) so far. RDNA4 (gfx12xx) shares the
+  same 64KB/CU LDS budget and matrix-core instruction support, so the
+  kernel should work, but tile configs haven't been benchmarked there —
+  CU count and occupancy math differ enough (84 CUs on a 7900 XT, 64 on
+  a 9070 XT vs. 60 here) that a fresh autotune pass is worth doing rather
+  than assuming these exact numbers transfer.
+- Requires Triton ≥3.6 for this fork's kernel (tested). ComfyUI core's
+  *own* native Triton backend separately requires ≥3.7 to avoid a
+  `libdevice.rint` crash on HIP — that requirement is about core's path,
+  not this node's kernel.
 
-Ensuring proper handling of static weights when dynamic is deactivated
+## Credits
 
-2026-24-05:
-
-RAM usage for lora loading is fixed and on par with base comfy.
-
-RAM usage for model loading is fixed.
-
-Only thing that remains is on the fly quantization will create an extra int8 copy in memory, but it is too much of a hassle to work around. Please rely on swap or pre converted models if this is an issue.
-
-Fixed an issue with loading loras on models that include .bias layers (WAN, LTX2.X) which would cause a OOM error.
-
-2026-15-05:
-
-Bringing back stochastic lora. Some loras appear to need it, others don't, try it if your lora is not working and you don't like pre-lora. TLDR is "sometimes it really helps, sometimes its a little worse". See our measurements [here](https://github.com/BobJohnson24/ComfyUI-INT8-Fast/blob/RAMExp/Metrics.md#some-loras-require-stochastic-lora-to-work).
-
-Attempt at reducing RAM usage
-
-Fixed an issue with Pre-Lora crashing on windows
-
-2026-10-05:
-
-Overhauled the entire lora system. Normal lora loader node works now, no need for specialized lora loaders.
-
-Converted QuaRot to ConvRot, which is a small but free quality gain.
-
-Added Pre-Lora node, which you can connect to the INT8 Model loader to merge loras before utilizing on the fly quantization. 
-
-For more info on quality of convrot, lora approaches see the [Metrics](Metrics.md)
-
----
-
-# Common GPU related issues:
-
-RTX 20-Series will require you to either use Triton-Windows on windows, triton==3.2.0 or compile triton yourself with SM75 support which was dropped in 3.3.0.
-
-A100 has no possible INT8 Speed-up https://github.com/BobJohnson24/ComfyUI-INT8-Fast/issues/71
-
-
-## FAQ:
-
-Q: How do I quantize myself?
-
-A: It is not recommended to quantize the human existence. If you would like to quantize a model, see example_workflows/int8_save_convrot_model.json
-
-Q: What is ConvRot?
-
-A: ConvRot is a variant of QuaRot. It basically rotates model weights and activations to eliminate outliers before quantization. This has some inference overhead, but is generally a large quality boost.
-
-Q: What is Pre-Lora?
-
-A: Pre-Lora is a way to merge the lora weights to a BF16 checkpoint within ComfyUI before you quantize the model. This requires an unquantized base model, and enabling on-the-fly quantization. It is generally a higher quality way to apply a lora.
-
-Q: Torch compile takes forever and I hate it
-
-A: Use the torch compile node from [KJ Nodes](https://github.com/kijai/ComfyUI-KJNodes) and ensure you set the disable dynamic VRAM toggle.
-
-
-# Requirements:
-Working ComfyKitchen (needs latest comfy and possibly pytorch with cu130)
-
-Triton
-
-Windows untested, but I hear triton-windows exists.
-
-# Credits:
-
-## dxqb for the *entirety* of the INT8 code during the very early versions of this node, it would have been impossible without them:
-https://github.com/Nerogar/OneTrainer/pull/1034
-
-If you have a 30-Series GPU, OneTrainer is also the fastest current lora trainer thanks to this. Please go check them out!!
-
-## newgrit1004 for the base ConvRot code we modified into proper ConvRot 
-https://github.com/newgrit1004/ComfyUI-ZImage-Triton
-
-## silveroxides for providing a base to hack the INT8 conversion code onto.
-https://github.com/silveroxides/convert_to_quant
-
-## Also silveroxides for showing how to properly register new data types to comfy
-https://github.com/silveroxides/ComfyUI-QuantOps
-
-## The unholy trinity of AI slopsters I used to glue all this together over the course of multiple months now
+RDNA3 tuning and benchmarking work assisted by Claude (Anthropic).
