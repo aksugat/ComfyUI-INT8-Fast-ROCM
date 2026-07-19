@@ -72,7 +72,3 @@ quantization rather than assuming int8 always wins.
   *own* native Triton backend separately requires ≥3.7 to avoid a
   `libdevice.rint` crash on HIP — that requirement is about core's path,
   not this node's kernel.
-
-## Credits
-
-RDNA3 tuning and benchmarking work assisted by Claude (Anthropic).
