@@ -1,5 +1,5 @@
 """
-Experimental packed-INT4 x INT8 DP4A-style Triton GEMM.
+Experimental packed-INT4 x INT8 DP4A-style Triton GEMM, RDNA3-tuned.
 
 A: int8 [M, K] activations (values normally in [-7, 7])
 W: int8 [N, K // 2] packed signed INT4 weights
@@ -7,32 +7,68 @@ W: int8 [N, K // 2] packed signed INT4 weights
 
 Computes int32 C = A @ unpack(W).T without materializing unpack(W).
 The packed weight tile is decoded inside the Triton kernel.
-"""
 
-import os
+Kernel math is UNCHANGED from the original single-config version --
+verified bit-exact against a plain int reference across multiple shapes
+(including K=32 tail-masking and K=6144, the real Krea2 dimension) before
+any tuning was applied. Only the autotune config list is new.
+
+Same RDNA3 reasoning as int8_fused_kernel_amd.py: 60 CUs (7800 XT), 32-wide
+wavefronts, waves_per_eu as the occupancy knob, smaller tiles / fewer
+pipeline stages than an NVIDIA/CDNA-shaped config list would use. Not yet
+benchmarked for speed on real hardware -- run against the original fixed
+config before assuming any of these configs are actually faster.
+"""
 
 import torch
 import triton
 import triton.language as tl
 
 
-# Fixed first-pass correctness/performance config.
-BLOCK_SIZE_M = 64
-BLOCK_SIZE_N = 128
-BLOCK_SIZE_K = 32
-GROUP_SIZE_M = 8
-NUM_WARPS = 4
-NUM_STAGES = 2
+# =============================================================================
+# AMD RDNA3 (gfx1101) autotune configs
+# =============================================================================
+# Weight tiles here are HALF the bytes of an equivalent int8 GEMM tile (2
+# int4 values packed per byte), so larger BLOCK_K is cheaper on LDS/registers
+# per logical-K element than the int8 kernel's BLOCK_K -- included a few
+# larger-K variants on that basis, but this is a hypothesis to validate by
+# benchmark, not a guarantee.
+_AMD_RDNA3_INT4_CONFIGS = [
+    triton.Config({'BLOCK_SIZE_M': 64,  'BLOCK_SIZE_N': 64,  'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 2},
+                  num_stages=1, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 64,  'BLOCK_SIZE_N': 64,  'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 4},
+                  num_stages=1, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64,  'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 2},
+                  num_stages=1, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 64,  'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 2},
+                  num_stages=1, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 2},
+                  num_stages=1, num_warps=8),
+    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8, 'waves_per_eu': 1},
+                  num_stages=2, num_warps=8),
+    triton.Config({'BLOCK_SIZE_M': 32,  'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'waves_per_eu': 4},
+                  num_stages=1, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32,  'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 4, 'waves_per_eu': 4},
+                  num_stages=1, num_warps=4),
+    # Larger BLOCK_K variants -- half the byte footprint of int8's equivalent
+    # tile, may afford bigger K chunks before hitting the same LDS/register
+    # pressure. Speculative, needs benchmark confirmation.
+    triton.Config({'BLOCK_SIZE_M': 64,  'BLOCK_SIZE_N': 64,  'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8, 'waves_per_eu': 2},
+                  num_stages=1, num_warps=4),
+    triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32,  'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4, 'waves_per_eu': 2},
+                  num_stages=1, num_warps=4),
+]
 
 
+@triton.autotune(configs=_AMD_RDNA3_INT4_CONFIGS, key=['M', 'N', 'K'])
 @triton.jit
 def triton_int4_mm_kernel(
     a_ptr,
     w_ptr,
     c_ptr,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    K: tl.constexpr,
+    M,
+    N,
+    K,
     stride_am: tl.constexpr,
     stride_ak: tl.constexpr,
     stride_wn: tl.constexpr,
@@ -142,9 +178,9 @@ def triton_int4_mm(
 
     c = torch.empty((M, N), device=a.device, dtype=out_dtype)
 
-    grid = (
-        triton.cdiv(M, BLOCK_SIZE_M)
-        * triton.cdiv(N, BLOCK_SIZE_N),
+    grid = lambda META: (
+        triton.cdiv(M, META['BLOCK_SIZE_M'])
+        * triton.cdiv(N, META['BLOCK_SIZE_N']),
     )
 
     triton_int4_mm_kernel[grid](
@@ -160,11 +196,5 @@ def triton_int4_mm(
         packed_weight.stride(1),
         c.stride(0),
         c.stride(1),
-        BLOCK_SIZE_M=BLOCK_SIZE_M,
-        BLOCK_SIZE_N=BLOCK_SIZE_N,
-        BLOCK_SIZE_K=BLOCK_SIZE_K,
-        GROUP_SIZE_M=GROUP_SIZE_M,
-        num_warps=NUM_WARPS,
-        num_stages=NUM_STAGES,
     )
     return c
