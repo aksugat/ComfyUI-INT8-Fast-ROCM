@@ -1,3 +1,6 @@
+Dont forget INT4 HAS ITS OWN NODE seperate from INT8 NODE
+
+
 ComfyUI-INT8-Fast-ROCM (AMD RDNA3-Tuned)
 Fast INT8 (W8A8) quantized inference for diffusion models in ComfyUI, with Triton kernels specifically tuned for AMD RDNA3 consumer GPUs — validated on an RX 7800 XT (gfx1101).
 
